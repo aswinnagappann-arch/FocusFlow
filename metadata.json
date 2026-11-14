@@ -1,0 +1,8 @@
+{
+  "name": "FocusFlow",
+  "description": "Personal productivity and spaced-repetition learning tracker with automated 1-4-7 follow-up reminders. Learn. Organise. Remember.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
