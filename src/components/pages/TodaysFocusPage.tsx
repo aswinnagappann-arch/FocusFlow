@@ -14,6 +14,7 @@ export const TodaysFocusPage: React.FC = () => {
   const {
     state,
     toggleTaskStatus,
+    toggleTaskReminderStatus,
     toggleFollowUpStatus,
     timerSecondsLeft,
     timerPresetMinutes,
@@ -30,18 +31,28 @@ export const TodaysFocusPage: React.FC = () => {
   const today = getTodayISO();
 
   const todaysTasks = state.tasks.filter((t) => t.dueDate === today);
+  const todaysTaskReminders = state.taskReminders.filter((r) => r.scheduledDate === today);
   const todaysFollowUps = state.followUps.filter((f) => f.scheduledDate === today);
   const todaysTopics = state.topics.filter(
     (tp) => tp.learnedDate === today || tp.status === 'in_progress'
   );
 
   const pendingTasks = todaysTasks.filter((t) => t.status === 'pending');
+  const pendingTaskReminders = todaysTaskReminders.filter((r) => r.status === 'pending');
   const pendingFollowUps = todaysFollowUps.filter((f) => f.status === 'pending');
 
   const completedItems = [
     ...todaysTasks
       .filter((t) => t.status === 'completed')
       .map((t) => ({ id: t.id, kind: 'task' as const, title: t.title, meta: t.category })),
+    ...todaysTaskReminders
+      .filter((r) => r.status === 'completed')
+      .map((r) => ({
+        id: r.id,
+        kind: 'taskReminder' as const,
+        title: `${r.taskTitle} (Day ${r.stage} · Cycle ${r.cycle})`,
+        meta: r.category,
+      })),
     ...todaysFollowUps
       .filter((f) => f.status === 'completed')
       .map((f) => ({
@@ -52,7 +63,8 @@ export const TodaysFocusPage: React.FC = () => {
       })),
   ];
 
-  const totalDueToday = todaysTasks.length + todaysFollowUps.length;
+  const totalDueToday =
+    todaysTasks.length + todaysTaskReminders.length + todaysFollowUps.length;
   const completedCount = completedItems.length;
   const progressPct = totalDueToday > 0 ? Math.round((completedCount / totalDueToday) * 100) : 0;
 
@@ -177,18 +189,41 @@ export const TodaysFocusPage: React.FC = () => {
         </div>
       </section>
 
-      {/* Follow-ups Due Today */}
+      {/* Reminders & Follow-ups Due Today */}
       <section className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-6">
         <h2 className="text-base font-semibold text-gray-900 dark:text-white mb-4">
-          Follow-ups Due Today ({pendingFollowUps.length})
+          Reminders &amp; Follow-ups Due Today ({pendingTaskReminders.length + pendingFollowUps.length})
         </h2>
 
-        {pendingFollowUps.length === 0 ? (
+        {pendingTaskReminders.length === 0 && pendingFollowUps.length === 0 ? (
           <p className="text-sm text-gray-500 dark:text-[#7C8496]">
-            All scheduled 1-4-7 follow-ups for today are complete.
+            All scheduled 1-4-7 task reminders and topic follow-ups for today are complete.
           </p>
         ) : (
           <div className="divide-y divide-gray-100 dark:divide-[#1D212B]">
+            {pendingTaskReminders.map((rem) => (
+              <div key={rem.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => toggleTaskReminderStatus(rem.id)}
+                    aria-label={`Complete Day ${rem.stage} reminder for ${rem.taskTitle}`}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-gray-300 dark:border-[#343B4D] hover:border-violet-500 transition-colors"
+                  />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                      {rem.taskTitle}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-[#7C8496]">
+                      Day {rem.stage} Task Reminder · Cycle {rem.cycle} · {rem.category}
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs font-medium text-amber-600 dark:text-amber-400 shrink-0">
+                  Due today
+                </span>
+              </div>
+            ))}
             {pendingFollowUps.map((fu) => (
               <div key={fu.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
                 <div className="flex items-center gap-3 min-w-0">
@@ -203,7 +238,7 @@ export const TodaysFocusPage: React.FC = () => {
                       {fu.topicName}
                     </p>
                     <p className="text-xs text-gray-500 dark:text-[#7C8496]">
-                      Day {fu.stage} Recall · {fu.category}
+                      Day {fu.stage} Topic Recall · {fu.category}
                     </p>
                   </div>
                 </div>
@@ -309,6 +344,8 @@ export const TodaysFocusPage: React.FC = () => {
                     onClick={() =>
                       item.kind === 'task'
                         ? toggleTaskStatus(item.id)
+                        : item.kind === 'taskReminder'
+                        ? toggleTaskReminderStatus(item.id)
                         : toggleFollowUpStatus(item.id)
                     }
                     className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-emerald-600 text-white"

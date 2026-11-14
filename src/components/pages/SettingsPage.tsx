@@ -5,14 +5,11 @@ import {
   Check,
   Download,
   Globe,
-  LogOut,
   Moon,
-  RefreshCw,
   RotateCcw,
   Sun,
 } from 'lucide-react';
 import { useFocusFlow } from '../../context/FocusFlowContext';
-import { GoogleSignInButton } from '../common/GoogleSignInButton';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 
 const TIMEZONES = [
@@ -34,16 +31,9 @@ export const SettingsPage: React.FC = () => {
     updateProfile,
     updateSettings,
     resetAllData,
-    gcalUser,
-    gcalConnected,
-    gcalEvents,
-    gcalLoading,
-    gcalError,
-    connectGoogleCalendar,
-    disconnectGoogleCalendar,
-    refreshGoogleCalendarEvents,
     pushPermission,
     requestPushPermission,
+    setActivePage,
   } = useFocusFlow();
 
   const [name, setName] = useState(state.profile.name);
@@ -71,8 +61,8 @@ export const SettingsPage: React.FC = () => {
 
   const sendTestPush = () => {
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      new Notification('FocusFlow Reminder Preview', {
-        body: 'Push notifications are active for your tasks, 1-4-7 follow-ups, and calendar events.',
+      new Notification('FocusFlow Local Reminder Preview', {
+        body: 'Local notifications are active for 1-4-7 task loops, 1-4-7 topic follow-ups, and calendar events.',
         icon: '/pwa-192x192.png',
       });
     }
@@ -95,7 +85,7 @@ export const SettingsPage: React.FC = () => {
           Settings
         </h1>
         <p className="mt-1 text-sm text-gray-500 dark:text-[#8E96A8]">
-          Manage your profile, appearance, timezone, and push notifications
+          Manage your profile, appearance, timezone, local calendar, and notifications
         </p>
       </div>
 
@@ -207,7 +197,7 @@ export const SettingsPage: React.FC = () => {
               Time Zone
             </p>
             <p className="text-xs text-gray-500 dark:text-[#7C8496]">
-              Used to schedule 1-4-7 follow-ups and daily push reminders
+              Used to schedule 1-4-7 task loops, learning follow-ups, and daily push reminders
             </p>
           </div>
 
@@ -229,76 +219,24 @@ export const SettingsPage: React.FC = () => {
         </div>
       </section>
 
-      {/* Google Calendar Integration */}
-      <section className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-6 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900 dark:text-white inline-flex items-center gap-2">
-              <CalendarDays className="w-4 h-4 text-violet-500" />
-              Google Calendar
-            </h2>
-            <p className="text-xs text-gray-500 dark:text-[#7C8496] mt-0.5">
-              Connect your Google account to view events and sync 1-4-7 follow-up reminders.
-            </p>
-          </div>
-          <span
-            className={`text-xs font-medium ${
-              gcalConnected
-                ? 'text-emerald-600 dark:text-emerald-400'
-                : 'text-gray-500 dark:text-[#7C8496]'
-            }`}
-          >
-            {gcalConnected ? 'Connected' : 'Not connected'}
-          </span>
+      {/* Local Calendar Summary */}
+      <section className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-white inline-flex items-center gap-2">
+            <CalendarDays className="w-4 h-4 text-teal-500" />
+            Local Calendar
+          </h2>
+          <p className="text-xs text-gray-500 dark:text-[#7C8496] mt-0.5">
+            All tasks, 1-4-7 reminder loops, learning follow-ups, and custom events run locally in your browser without external sign-in.
+          </p>
         </div>
-
-        {gcalError && (
-          <p className="text-xs text-red-500 dark:text-red-400">{gcalError}</p>
-        )}
-
-        {!gcalConnected ? (
-          <div>
-            <GoogleSignInButton
-              onClick={() => {
-                void connectGoogleCalendar();
-              }}
-              disabled={gcalLoading}
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-gray-100 dark:border-[#1E232E]">
-            <div className="text-xs text-gray-600 dark:text-[#9CA3AF]">
-              Signed in as{' '}
-              <strong className="text-gray-900 dark:text-white">
-                {gcalUser?.email || gcalUser?.displayName || 'Google Account'}
-              </strong>{' '}
-              · <span className="font-mono tabular-nums">{gcalEvents.length}</span> events synced
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={gcalLoading}
-                onClick={() => {
-                  void refreshGoogleCalendarEvents();
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#262C3B] px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1B1F2A]"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${gcalLoading ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void disconnectGoogleCalendar();
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-500/10"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                Disconnect
-              </button>
-            </div>
-          </div>
-        )}
+        <button
+          type="button"
+          onClick={() => setActivePage('calendar')}
+          className="rounded-xl border border-gray-200 dark:border-[#262C3B] px-3.5 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1B1F2A] shrink-0 self-start sm:self-auto"
+        >
+          Open Calendar
+        </button>
       </section>
 
       {/* Push Notifications Only */}
@@ -307,10 +245,10 @@ export const SettingsPage: React.FC = () => {
           <div>
             <h2 className="text-base font-semibold text-gray-900 dark:text-white inline-flex items-center gap-2">
               <Bell className="w-4 h-4 text-violet-500" />
-              Push Notifications
+              Local Browser Notifications
             </h2>
             <p className="text-xs text-gray-500 dark:text-[#7C8496] mt-0.5">
-              FocusFlow uses browser push notifications only for calm, distraction-free alerts.
+              Receive local browser alerts for tasks, Day 1-4-7 task loops, and topic recalls.
             </p>
           </div>
 
@@ -363,6 +301,23 @@ export const SettingsPage: React.FC = () => {
           <label className="flex items-center justify-between gap-4 cursor-pointer">
             <div>
               <p className="text-sm font-medium text-gray-900 dark:text-white">
+                Tasks &amp; 1-4-7 Reminder Loop Alerts
+              </p>
+              <p className="text-xs text-gray-500 dark:text-[#7C8496]">
+                Notify on task due times and Day 1, Day 4, and Day 7 looped reminders
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={state.settings.remindTasks}
+              onChange={(e) => updateSettings({ remindTasks: e.target.checked })}
+              className="h-4 w-4 accent-violet-600 rounded"
+            />
+          </label>
+
+          <label className="flex items-center justify-between gap-4 cursor-pointer">
+            <div>
+              <p className="text-sm font-medium text-gray-900 dark:text-white">
                 1-4-7 Learning Follow-up Alerts
               </p>
               <p className="text-xs text-gray-500 dark:text-[#7C8496]">
@@ -373,23 +328,6 @@ export const SettingsPage: React.FC = () => {
               type="checkbox"
               checked={state.settings.remindFollowups}
               onChange={(e) => updateSettings({ remindFollowups: e.target.checked })}
-              className="h-4 w-4 accent-violet-600 rounded"
-            />
-          </label>
-
-          <label className="flex items-center justify-between gap-4 cursor-pointer">
-            <div>
-              <p className="text-sm font-medium text-gray-900 dark:text-white">
-                Task Deadline Push Alerts
-              </p>
-              <p className="text-xs text-gray-500 dark:text-[#7C8496]">
-                Notify before a scheduled task due time
-              </p>
-            </div>
-            <input
-              type="checkbox"
-              checked={state.settings.remindTasks}
-              onChange={(e) => updateSettings({ remindTasks: e.target.checked })}
               className="h-4 w-4 accent-violet-600 rounded"
             />
           </label>

@@ -1,21 +1,24 @@
 import React, { useMemo, useState } from 'react';
 import {
   Bell,
-  CalendarPlus,
+  CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock,
-  ExternalLink,
-  LogOut,
+  Download,
   Plus,
-  RefreshCw,
+  Repeat,
   Trash2,
   X,
 } from 'lucide-react';
 import { useFocusFlow } from '../../context/FocusFlowContext';
-import { GoogleCalendarEvent } from '../../services/googleCalendarService';
-import { FollowUpSession, Task } from '../../types/focusflow';
+import {
+  FollowUpSession,
+  LocalCalendarEvent,
+  Task,
+  TaskReminderSession,
+} from '../../types/focusflow';
 import {
   formatFullDate,
   formatReadableDate,
@@ -25,38 +28,26 @@ import {
   getTodayISO,
   toISODate,
 } from '../../utils/dateUtils';
-import { GoogleSignInButton } from '../common/GoogleSignInButton';
-import {
-  ConfirmGoogleCalendarActionModal,
-  PendingGCalAction,
-} from '../modals/ConfirmGoogleCalendarActionModal';
 
 type CalendarView = 'month' | 'week' | 'agenda';
 
 type SelectedEvent =
+  | { kind: 'taskReminder'; item: TaskReminderSession }
   | { kind: 'followup'; item: FollowUpSession }
   | { kind: 'task'; item: Task }
-  | { kind: 'gcal'; item: GoogleCalendarEvent }
+  | { kind: 'localEvent'; item: LocalCalendarEvent }
   | null;
 
 export const CalendarPage: React.FC = () => {
   const {
     state,
+    toggleTaskReminderStatus,
     toggleFollowUpStatus,
     toggleTaskStatus,
     openCreateTaskModal,
     openEditTaskModal,
-    gcalUser,
-    gcalConnected,
-    gcalEvents,
-    gcalLoading,
-    gcalError,
-    connectGoogleCalendar,
-    disconnectGoogleCalendar,
-    refreshGoogleCalendarEvents,
-    syncTaskToGoogleCalendar,
-    syncFollowUpToGoogleCalendar,
-    deleteGoogleCalendarEventById,
+    addLocalEvent,
+    deleteLocalEvent,
     pushPermission,
     requestPushPermission,
     updateSettings,
@@ -67,9 +58,15 @@ export const CalendarPage: React.FC = () => {
   const [cursorDate, setCursorDate] = useState<Date>(() => new Date());
   const [selectedDayISO, setSelectedDayISO] = useState<string>(todayISO);
   const [selectedEvent, setSelectedEvent] = useState<SelectedEvent>(null);
-  const [pendingAction, setPendingAction] = useState<PendingGCalAction | null>(null);
-  const [actionBusy, setActionBusy] = useState(false);
-  const [actionNotice, setActionNotice] = useState<string | null>(null);
+
+  // Add Local Event Modal State
+  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [evTitle, setEvTitle] = useState('');
+  const [evDescription, setEvDescription] = useState('');
+  const [evDate, setEvDate] = useState(todayISO);
+  const [evTime, setEvTime] = useState('09:00');
+  const [evColor, setEvColor] = useState<LocalCalendarEvent['color']>('teal');
+  const [evError, setEvError] = useState('');
 
   const monthDates = useMemo(
     () => getMonthGridDates(cursorDate.getFullYear(), cursorDate.getMonth()),
@@ -88,11 +85,22 @@ export const CalendarPage: React.FC = () => {
   const eventsByDate = useMemo(() => {
     const map: Record<
       string,
-      { followUps: FollowUpSession[]; tasks: Task[]; gcal: GoogleCalendarEvent[] }
+      {
+        taskReminders: TaskReminderSession[];
+        followUps: FollowUpSession[];
+        tasks: Task[];
+        localEvents: LocalCalendarEvent[];
+      }
     > = {};
     const ensure = (iso: string) => {
-      if (!map[iso]) map[iso] = { followUps: [], tasks: [], gcal: [] };
+      if (!map[iso]) {
+        map[iso] = { taskReminders: [], followUps: [], tasks: [], localEvents: [] };
+      }
     };
+    for (const rem of state.taskReminders) {
+      ensure(rem.scheduledDate);
+      map[rem.scheduledDate].taskReminders.push(rem);
+    }
     for (const fu of state.followUps) {
       ensure(fu.scheduledDate);
       map[fu.scheduledDate].followUps.push(fu);
@@ -101,12 +109,12 @@ export const CalendarPage: React.FC = () => {
       ensure(t.dueDate);
       map[t.dueDate].tasks.push(t);
     }
-    for (const ev of gcalEvents) {
-      ensure(ev.startDate);
-      map[ev.startDate].gcal.push(ev);
+    for (const ev of state.localEvents) {
+      ensure(ev.date);
+      map[ev.date].localEvents.push(ev);
     }
     return map;
-  }, [state.followUps, state.tasks, gcalEvents]);
+  }, [state.taskReminders, state.followUps, state.tasks, state.localEvents]);
 
   const navigatePeriod = (dir: -1 | 1) => {
     const next = new Date(cursorDate);
@@ -127,6 +135,96 @@ export const CalendarPage: React.FC = () => {
     setSelectedDayISO(todayISO);
   };
 
+  const openAddLocalEvent = (presetDate?: string) => {
+    setEvTitle('');
+    setEvDescription('');
+    setEvDate(presetDate || selectedDayISO || todayISO);
+    setEvTime('09:00');
+    setEvColor('teal');
+    setEvError('');
+    setIsEventModalOpen(true);
+  };
+
+  const handleCreateLocalEvent = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!evTitle.trim()) {
+      setEvError('Please enter an event title.');
+      return;
+    }
+    addLocalEvent({
+      title: evTitle.trim(),
+      description: evDescription.trim(),
+      date: evDate || todayISO,
+      time: evTime || '09:00',
+      color: evColor,
+    });
+    setIsEventModalOpen(false);
+  };
+
+  const exportLocalICS = () => {
+    const lines: string[] = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//FocusFlow//Local Calendar//EN',
+    ];
+
+    const formatICSDate = (iso: string) => iso.replace(/-/g, '');
+    const escapeText = (txt: string) => txt.replace(/[\n\r]+/g, '\\n').replace(/,/g, '\\,');
+
+    for (const rem of state.taskReminders) {
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:${rem.id}@focusflow.local`,
+        `DTSTART;VALUE=DATE:${formatICSDate(rem.scheduledDate)}`,
+        `SUMMARY:${escapeText(`[Day ${rem.stage} · Cycle ${rem.cycle}] ${rem.taskTitle}`)}`,
+        `DESCRIPTION:${escapeText(`1-4-7 Task Reminder (${rem.category})`)}`,
+        'END:VEVENT'
+      );
+    }
+
+    for (const fu of state.followUps) {
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:${fu.id}@focusflow.local`,
+        `DTSTART;VALUE=DATE:${formatICSDate(fu.scheduledDate)}`,
+        `SUMMARY:${escapeText(`[Day ${fu.stage} Recall] ${fu.topicName}`)}`,
+        `DESCRIPTION:${escapeText(`1-4-7 Topic Follow-up (${fu.category})`)}`,
+        'END:VEVENT'
+      );
+    }
+
+    for (const t of state.tasks) {
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:${t.id}@focusflow.local`,
+        `DTSTART;VALUE=DATE:${formatICSDate(t.dueDate)}`,
+        `SUMMARY:${escapeText(t.title)}`,
+        `DESCRIPTION:${escapeText(`${t.category} · ${t.priority} priority`)}`,
+        'END:VEVENT'
+      );
+    }
+
+    for (const ev of state.localEvents) {
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:${ev.id}@focusflow.local`,
+        `DTSTART;VALUE=DATE:${formatICSDate(ev.date)}`,
+        `SUMMARY:${escapeText(ev.title)}`,
+        `DESCRIPTION:${escapeText(ev.description || 'Local Calendar Event')}`,
+        'END:VEVENT'
+      );
+    }
+
+    lines.push('END:VCALENDAR');
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `focusflow-local-calendar-${todayISO}.ics`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const headerTitle =
     view === 'month'
       ? cursorDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
@@ -136,7 +234,20 @@ export const CalendarPage: React.FC = () => {
         )}`
       : formatFullDate(selectedDayISO);
 
-  const stageStyles = (stage: 1 | 4 | 7, completed: boolean) => {
+  const taskReminderStageStyles = (stage: 1 | 4 | 7, completed: boolean) => {
+    if (completed) {
+      return 'bg-gray-100 dark:bg-[#1B1F29] text-gray-400 dark:text-[#636B7D] line-through border-gray-200 dark:border-[#242936]';
+    }
+    if (stage === 1) {
+      return 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25';
+    }
+    if (stage === 4) {
+      return 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/25';
+    }
+    return 'bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/25';
+  };
+
+  const followUpStageStyles = (stage: 1 | 4 | 7, completed: boolean) => {
     if (completed) {
       return 'bg-gray-100 dark:bg-[#1B1F29] text-gray-400 dark:text-[#636B7D] line-through border-gray-200 dark:border-[#242936]';
     }
@@ -149,12 +260,27 @@ export const CalendarPage: React.FC = () => {
     return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25';
   };
 
-  const selectedDayEvents = eventsByDate[selectedDayISO] || {
-    followUps: [],
-    tasks: [],
-    gcal: [],
+  const localEventColorStyles = (color: LocalCalendarEvent['color']) => {
+    if (color === 'violet') {
+      return 'border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300';
+    }
+    if (color === 'amber') {
+      return 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300';
+    }
+    return 'border-teal-500/25 bg-teal-500/10 text-teal-700 dark:text-teal-300';
   };
 
+  const selectedDayEvents = eventsByDate[selectedDayISO] || {
+    taskReminders: [],
+    followUps: [],
+    tasks: [],
+    localEvents: [],
+  };
+
+  const activeModalTaskReminder =
+    selectedEvent?.kind === 'taskReminder'
+      ? state.taskReminders.find((r) => r.id === selectedEvent.item.id) || null
+      : null;
   const activeModalFollowUp =
     selectedEvent?.kind === 'followup'
       ? state.followUps.find((f) => f.id === selectedEvent.item.id) || null
@@ -163,81 +289,12 @@ export const CalendarPage: React.FC = () => {
     selectedEvent?.kind === 'task'
       ? state.tasks.find((t) => t.id === selectedEvent.item.id) || null
       : null;
-  const activeModalGCal =
-    selectedEvent?.kind === 'gcal'
-      ? gcalEvents.find((g) => g.id === selectedEvent.item.id) || null
+  const activeModalLocalEvent =
+    selectedEvent?.kind === 'localEvent'
+      ? state.localEvents.find((ev) => ev.id === selectedEvent.item.id) || null
       : null;
 
-  const showNotice = (msg: string) => {
-    setActionNotice(msg);
-    window.setTimeout(() => setActionNotice(null), 3500);
-  };
-
-  const requestSyncFollowUp = (fu: FollowUpSession) => {
-    setPendingAction({
-      type: 'create',
-      title: 'Sync Follow-up to Google Calendar?',
-      description: `This will add "[FocusFlow Day ${fu.stage} Recall] ${fu.topicName}" to your primary Google Calendar on ${formatFullDate(
-        fu.scheduledDate
-      )}.`,
-      confirmLabel: 'Confirm & Sync',
-      onConfirm: async () => {
-        setActionBusy(true);
-        try {
-          await syncFollowUpToGoogleCalendar(fu);
-          setPendingAction(null);
-          setSelectedEvent(null);
-          showNotice(`Synced Day ${fu.stage} recall for "${fu.topicName}" to Google Calendar.`);
-        } finally {
-          setActionBusy(false);
-        }
-      },
-    });
-  };
-
-  const requestSyncTask = (task: Task) => {
-    setPendingAction({
-      type: 'create',
-      title: 'Sync Task to Google Calendar?',
-      description: `This will add "[FocusFlow Task] ${task.title}" to your primary Google Calendar on ${formatFullDate(
-        task.dueDate
-      )} at ${formatTime12h(task.dueTime)}.`,
-      confirmLabel: 'Confirm & Sync',
-      onConfirm: async () => {
-        setActionBusy(true);
-        try {
-          await syncTaskToGoogleCalendar(task);
-          setPendingAction(null);
-          setSelectedEvent(null);
-          showNotice(`Synced "${task.title}" to Google Calendar.`);
-        } finally {
-          setActionBusy(false);
-        }
-      },
-    });
-  };
-
-  const requestDeleteGCalEvent = (ev: GoogleCalendarEvent) => {
-    setPendingAction({
-      type: 'delete',
-      title: 'Delete Google Calendar Event?',
-      description: `Are you sure you want to permanently delete "${ev.summary}" (${formatFullDate(
-        ev.startDate
-      )}) from your primary Google Calendar?`,
-      confirmLabel: 'Delete Event',
-      onConfirm: async () => {
-        setActionBusy(true);
-        try {
-          await deleteGoogleCalendarEventById(ev.id);
-          setPendingAction(null);
-          setSelectedEvent(null);
-          showNotice(`Deleted "${ev.summary}" from Google Calendar.`);
-        } finally {
-          setActionBusy(false);
-        }
-      },
-    });
-  };
+  const pendingReminderCount = state.taskReminders.filter((r) => r.status === 'pending').length;
 
   return (
     <div className="space-y-6">
@@ -245,84 +302,61 @@ export const CalendarPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">
-            Follow-up Calendar
+            Local Calendar
           </h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-[#8E96A8]">
-            1-4-7 learning reminders, task deadlines, and Google Calendar events
+            Runs locally in your browser · 1-4-7 task reminder loops, learning recalls, and events
           </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => openAddLocalEvent(selectedDayISO)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#262C3B] bg-white dark:bg-[#13161C] hover:bg-gray-50 dark:hover:bg-[#1B1F2A] px-3.5 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-200 transition-colors whitespace-nowrap"
+          >
+            <CalendarDays className="w-4 h-4 text-teal-500" />
+            <span>Add Local Event</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => openCreateTaskModal(selectedDayISO)}
+            className="inline-flex items-center gap-2 rounded-xl bg-gray-900 dark:bg-violet-600 hover:bg-gray-800 dark:hover:bg-violet-500 px-4 py-2.5 text-sm font-medium text-white transition-colors whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Task on {formatReadableDate(selectedDayISO)}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Local Calendar Status & ICS Export */}
+      <div className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div className="flex items-start sm:items-center gap-3 min-w-0">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-teal-500/15 text-teal-600 dark:text-teal-400">
+            <Repeat className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-gray-900 dark:text-white">
+              Offline-Ready Local Schedule ({pendingReminderCount} active 1-4-7 reminders)
+            </p>
+            <p className="text-xs text-gray-500 dark:text-[#8E96A8]">
+              Every new task automatically schedules Day 1, Day 4, and Day 7 reminders and loops into the next cycle after Day 7.
+            </p>
+          </div>
         </div>
 
         <button
           type="button"
-          onClick={() => openCreateTaskModal(selectedDayISO)}
-          className="inline-flex items-center gap-2 rounded-xl bg-gray-900 dark:bg-violet-600 hover:bg-gray-800 dark:hover:bg-violet-500 px-4 py-2.5 text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0 self-start sm:self-auto"
+          onClick={exportLocalICS}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#262C3B] px-3.5 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1B1F2A] transition-colors shrink-0 self-start md:self-auto"
         >
-          <Plus className="w-4 h-4" />
-          <span>Add Task on {formatReadableDate(selectedDayISO)}</span>
+          <Download className="w-3.5 h-3.5" />
+          <span>Export .ics File</span>
         </button>
       </div>
 
-      {/* Google Calendar Connection Banner */}
-      <div className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-gray-900 dark:text-white">
-            Google Calendar Sync
-          </p>
-          {gcalConnected ? (
-            <p className="text-xs text-gray-500 dark:text-[#8E96A8] mt-0.5 truncate">
-              Connected as {gcalUser?.email || gcalUser?.displayName || 'Google Account'} ·{' '}
-              <span className="font-mono tabular-nums">{gcalEvents.length}</span> events loaded
-            </p>
-          ) : (
-            <p className="text-xs text-gray-500 dark:text-[#8E96A8] mt-0.5">
-              Sign in with Google to view your primary calendar events and sync 1-4-7 reminders.
-            </p>
-          )}
-          {gcalError && (
-            <p className="mt-1 text-xs text-red-500 dark:text-red-400">{gcalError}</p>
-          )}
-          {actionNotice && (
-            <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">{actionNotice}</p>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {!gcalConnected ? (
-            <GoogleSignInButton
-              onClick={() => {
-                void connectGoogleCalendar();
-              }}
-              disabled={gcalLoading}
-            />
-          ) : (
-            <>
-              <button
-                type="button"
-                disabled={gcalLoading}
-                onClick={() => {
-                  void refreshGoogleCalendarEvents();
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1B1F2A] transition-colors disabled:opacity-60"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${gcalLoading ? 'animate-spin' : ''}`} />
-                <span>Refresh</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void disconnectGoogleCalendar();
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-50 dark:hover:bg-[#1B1F2A] transition-colors"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Disconnect</span>
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Calendar Notifications Status Bar */}
+      {/* Local Push Notifications Bar */}
       <div className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div className="flex items-start sm:items-center gap-3 min-w-0">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-violet-500/15 text-violet-600 dark:text-violet-400">
@@ -330,16 +364,16 @@ export const CalendarPage: React.FC = () => {
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium text-gray-900 dark:text-white">
-              Calendar Push Notifications
+              Local Reminder Push Notifications
             </p>
             <p className="text-xs text-gray-500 dark:text-[#8E96A8]">
               {pushPermission === 'granted' && state.settings.pushEnabled
-                ? 'Active for tasks, 1-4-7 follow-ups, and synced Google Calendar events.'
+                ? 'Active for Day 1-4-7 task reminders, tasks, 1-4-7 topic follow-ups, and local events.'
                 : pushPermission === 'denied'
                 ? 'Blocked in browser settings — allow notifications for this site to receive alerts.'
                 : pushPermission === 'unsupported'
-                ? 'Browser notifications are unavailable in this environment; Google Calendar popup alerts still apply on synced events.'
-                : 'Enable browser push notifications to receive live alerts for all scheduled work.'}
+                ? 'Browser notifications are unavailable in this environment; all reminders remain tracked on your Local Calendar.'
+                : 'Enable browser notifications to receive live local alerts on Day 1, Day 4, and Day 7.'}
             </p>
           </div>
         </div>
@@ -354,7 +388,7 @@ export const CalendarPage: React.FC = () => {
                   onChange={(e) => updateSettings({ remindTasks: e.target.checked })}
                   className="h-3.5 w-3.5 accent-violet-600 rounded"
                 />
-                <span>Tasks</span>
+                <span>Tasks &amp; 1-4-7 Loop</span>
               </label>
               <label className="inline-flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-200 cursor-pointer">
                 <input
@@ -363,7 +397,7 @@ export const CalendarPage: React.FC = () => {
                   onChange={(e) => updateSettings({ remindFollowups: e.target.checked })}
                   className="h-3.5 w-3.5 accent-violet-600 rounded"
                 />
-                <span>1-4-7 Follow-ups</span>
+                <span>1-4-7 Topics</span>
               </label>
               <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
                 Enabled
@@ -418,27 +452,26 @@ export const CalendarPage: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-4">
-          {/* Explicit text legend (never color-only) */}
           <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600 dark:text-[#8E96A8]">
             <span className="inline-flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-sm bg-violet-500" />
-              Day 1
+              <span className="h-2 w-2 rounded-sm bg-amber-500" />
+              Task Day 1
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-sm bg-sky-500" />
-              Day 4
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-sm bg-emerald-500" />
-              Day 7
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-sm bg-gray-400 dark:bg-gray-500" />
-              Task
+              <span className="h-2 w-2 rounded-sm bg-rose-500" />
+              Task Day 4
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-sm bg-teal-500" />
-              GCal
+              Task Day 7
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-sm bg-violet-500" />
+              Topic Follow-up
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-sm bg-gray-400 dark:bg-gray-500" />
+              Task Due
             </span>
           </div>
 
@@ -481,9 +514,17 @@ export const CalendarPage: React.FC = () => {
               const inMonth = d.getMonth() === cursorDate.getMonth();
               const isToday = iso === todayISO;
               const isSelected = iso === selectedDayISO;
-              const dayEvents = eventsByDate[iso] || { followUps: [], tasks: [], gcal: [] };
+              const dayEvents = eventsByDate[iso] || {
+                taskReminders: [],
+                followUps: [],
+                tasks: [],
+                localEvents: [],
+              };
               const totalEvents =
-                dayEvents.followUps.length + dayEvents.tasks.length + dayEvents.gcal.length;
+                dayEvents.taskReminders.length +
+                dayEvents.followUps.length +
+                dayEvents.tasks.length +
+                dayEvents.localEvents.length;
 
               return (
                 <div
@@ -492,7 +533,7 @@ export const CalendarPage: React.FC = () => {
                     setSelectedDayISO(iso);
                     setCursorDate(d);
                   }}
-                  className={`min-h-[96px] sm:min-h-[116px] p-2 cursor-pointer transition-colors ${
+                  className={`min-h-[96px] sm:min-h-[120px] p-2 cursor-pointer transition-colors ${
                     inMonth
                       ? 'bg-white dark:bg-[#13161C]'
                       : 'bg-gray-50/50 dark:bg-[#0D1015]/60 text-gray-400 dark:text-[#52596B]'
@@ -522,7 +563,23 @@ export const CalendarPage: React.FC = () => {
                   </div>
 
                   <div className="hidden sm:block space-y-1">
-                    {dayEvents.followUps.slice(0, 2).map((fu) => (
+                    {dayEvents.taskReminders.slice(0, 2).map((rem) => (
+                      <button
+                        key={rem.id}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedEvent({ kind: 'taskReminder', item: rem });
+                        }}
+                        className={`block w-full truncate rounded-md border px-1.5 py-0.5 text-left text-[11px] font-medium transition-opacity hover:opacity-85 ${taskReminderStageStyles(
+                          rem.stage,
+                          rem.status === 'completed'
+                        )}`}
+                      >
+                        D{rem.stage} · {rem.taskTitle}
+                      </button>
+                    ))}
+                    {dayEvents.followUps.slice(0, 1).map((fu) => (
                       <button
                         key={fu.id}
                         type="button"
@@ -530,12 +587,12 @@ export const CalendarPage: React.FC = () => {
                           e.stopPropagation();
                           setSelectedEvent({ kind: 'followup', item: fu });
                         }}
-                        className={`block w-full truncate rounded-md border px-1.5 py-0.5 text-left text-[11px] font-medium transition-opacity hover:opacity-85 ${stageStyles(
+                        className={`block w-full truncate rounded-md border px-1.5 py-0.5 text-left text-[11px] font-medium transition-opacity hover:opacity-85 ${followUpStageStyles(
                           fu.stage,
                           fu.status === 'completed'
                         )}`}
                       >
-                        D{fu.stage} · {fu.topicName}
+                        Topic D{fu.stage} · {fu.topicName}
                       </button>
                     ))}
                     {dayEvents.tasks.slice(0, 1).map((task) => (
@@ -555,17 +612,19 @@ export const CalendarPage: React.FC = () => {
                         {task.title}
                       </button>
                     ))}
-                    {dayEvents.gcal.slice(0, 2).map((ev) => (
+                    {dayEvents.localEvents.slice(0, 1).map((ev) => (
                       <button
                         key={ev.id}
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedEvent({ kind: 'gcal', item: ev });
+                          setSelectedEvent({ kind: 'localEvent', item: ev });
                         }}
-                        className="block w-full truncate rounded-md border border-teal-500/25 bg-teal-500/10 px-1.5 py-0.5 text-left text-[11px] font-medium text-teal-700 dark:text-teal-300 transition-opacity hover:opacity-85"
+                        className={`block w-full truncate rounded-md border px-1.5 py-0.5 text-left text-[11px] font-medium transition-opacity hover:opacity-85 ${localEventColorStyles(
+                          ev.color
+                        )}`}
                       >
-                        GCal · {ev.summary}
+                        Event · {ev.title}
                       </button>
                     ))}
                     {totalEvents > 4 && (
@@ -587,7 +646,12 @@ export const CalendarPage: React.FC = () => {
           {weekDates.map((d) => {
             const iso = toISODate(d);
             const isToday = iso === todayISO;
-            const dayEvents = eventsByDate[iso] || { followUps: [], tasks: [], gcal: [] };
+            const dayEvents = eventsByDate[iso] || {
+              taskReminders: [],
+              followUps: [],
+              tasks: [],
+              localEvents: [],
+            };
             return (
               <div
                 key={iso}
@@ -614,6 +678,26 @@ export const CalendarPage: React.FC = () => {
                 </div>
 
                 <div className="space-y-1.5 flex-1">
+                  {dayEvents.taskReminders.map((rem) => (
+                    <button
+                      key={rem.id}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedEvent({ kind: 'taskReminder', item: rem });
+                      }}
+                      className={`block w-full rounded-lg border p-2 text-left text-xs ${taskReminderStageStyles(
+                        rem.stage,
+                        rem.status === 'completed'
+                      )}`}
+                    >
+                      <span className="block font-semibold">
+                        Day {rem.stage} · Cycle {rem.cycle}
+                      </span>
+                      <span className="block truncate opacity-90">{rem.taskTitle}</span>
+                    </button>
+                  ))}
+
                   {dayEvents.followUps.map((fu) => (
                     <button
                       key={fu.id}
@@ -622,12 +706,12 @@ export const CalendarPage: React.FC = () => {
                         e.stopPropagation();
                         setSelectedEvent({ kind: 'followup', item: fu });
                       }}
-                      className={`block w-full rounded-lg border p-2 text-left text-xs ${stageStyles(
+                      className={`block w-full rounded-lg border p-2 text-left text-xs ${followUpStageStyles(
                         fu.stage,
                         fu.status === 'completed'
                       )}`}
                     >
-                      <span className="block font-semibold">Day {fu.stage} Recall</span>
+                      <span className="block font-semibold">Topic Day {fu.stage}</span>
                       <span className="block truncate opacity-90">{fu.topicName}</span>
                     </button>
                   ))}
@@ -653,26 +737,29 @@ export const CalendarPage: React.FC = () => {
                     </button>
                   ))}
 
-                  {dayEvents.gcal.map((ev) => (
+                  {dayEvents.localEvents.map((ev) => (
                     <button
                       key={ev.id}
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSelectedEvent({ kind: 'gcal', item: ev });
+                        setSelectedEvent({ kind: 'localEvent', item: ev });
                       }}
-                      className="block w-full rounded-lg border border-teal-500/25 bg-teal-500/10 p-2 text-left text-xs text-teal-700 dark:text-teal-300"
+                      className={`block w-full rounded-lg border p-2 text-left text-xs ${localEventColorStyles(
+                        ev.color
+                      )}`}
                     >
-                      <span className="block font-semibold truncate">GCal · {ev.summary}</span>
+                      <span className="block font-semibold truncate">{ev.title}</span>
                       <span className="block text-[11px] font-mono opacity-80">
-                        {ev.startTime ? formatTime12h(ev.startTime) : 'All day'}
+                        {formatTime12h(ev.time)}
                       </span>
                     </button>
                   ))}
 
-                  {dayEvents.followUps.length === 0 &&
+                  {dayEvents.taskReminders.length === 0 &&
+                    dayEvents.followUps.length === 0 &&
                     dayEvents.tasks.length === 0 &&
-                    dayEvents.gcal.length === 0 && (
+                    dayEvents.localEvents.length === 0 && (
                       <p className="text-xs text-gray-400 dark:text-[#5C6476] pt-2">
                         No events
                       </p>
@@ -690,31 +777,89 @@ export const CalendarPage: React.FC = () => {
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <div>
               <h3 className="text-base font-semibold text-gray-900 dark:text-white">
-                Agenda for {formatFullDate(selectedDayISO)}
+                Local Agenda for {formatFullDate(selectedDayISO)}
               </h3>
               <p className="text-xs text-gray-500 dark:text-[#7C8496]">
-                Click any item to view details, mark complete, or sync with Google Calendar
+                Complete a Day 7 task reminder to automatically loop into the next 1-4-7 cycle
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => openCreateTaskModal(selectedDayISO)}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1A1E28]"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              New Task This Day
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => openAddLocalEvent(selectedDayISO)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1A1E28]"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Local Event
+              </button>
+              <button
+                type="button"
+                onClick={() => openCreateTaskModal(selectedDayISO)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1A1E28]"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Task This Day
+              </button>
+            </div>
           </div>
 
-          {selectedDayEvents.followUps.length === 0 &&
+          {selectedDayEvents.taskReminders.length === 0 &&
+          selectedDayEvents.followUps.length === 0 &&
           selectedDayEvents.tasks.length === 0 &&
-          selectedDayEvents.gcal.length === 0 ? (
+          selectedDayEvents.localEvents.length === 0 ? (
             <p className="py-8 text-center text-sm text-gray-500 dark:text-[#7C8496]">
-              No follow-ups, tasks, or Google Calendar events scheduled for{' '}
+              No reminders, tasks, or local events scheduled for{' '}
               {formatReadableDate(selectedDayISO)}.
             </p>
           ) : (
             <div className="space-y-2.5">
+              {selectedDayEvents.taskReminders.map((rem) => (
+                <div
+                  key={rem.id}
+                  onClick={() => setSelectedEvent({ kind: 'taskReminder', item: rem })}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 dark:border-[#222734] bg-gray-50/70 dark:bg-[#0F1218] p-3.5 cursor-pointer hover:border-violet-500/40 transition-colors"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleTaskReminderStatus(rem.id);
+                      }}
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
+                        rem.status === 'completed'
+                          ? 'bg-emerald-600 border-emerald-600 text-white'
+                          : 'border-gray-300 dark:border-[#3A4256]'
+                      }`}
+                    >
+                      {rem.status === 'completed' && <Check className="w-3.5 h-3.5 stroke-[2.5]" />}
+                    </button>
+                    <div className="min-w-0">
+                      <p
+                        className={`text-sm font-medium truncate ${
+                          rem.status === 'completed'
+                            ? 'line-through text-gray-400 dark:text-[#636B7D]'
+                            : 'text-gray-900 dark:text-white'
+                        }`}
+                      >
+                        {rem.taskTitle}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-[#7C8496]">
+                        Day {rem.stage} Reminder · Cycle {rem.cycle} · {rem.category}
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={`rounded-lg border px-2.5 py-1 text-xs font-medium shrink-0 ${taskReminderStageStyles(
+                      rem.stage,
+                      rem.status === 'completed'
+                    )}`}
+                  >
+                    Day {rem.stage} · C{rem.cycle}
+                  </span>
+                </div>
+              ))}
+
               {selectedDayEvents.followUps.map((fu) => (
                 <div
                   key={fu.id}
@@ -747,12 +892,12 @@ export const CalendarPage: React.FC = () => {
                         {fu.topicName}
                       </p>
                       <p className="text-xs text-gray-500 dark:text-[#7C8496]">
-                        Day {fu.stage} Follow-up · {fu.category}
+                        Topic Day {fu.stage} Follow-up · {fu.category}
                       </p>
                     </div>
                   </div>
                   <span
-                    className={`rounded-lg border px-2.5 py-1 text-xs font-medium shrink-0 ${stageStyles(
+                    className={`rounded-lg border px-2.5 py-1 text-xs font-medium shrink-0 ${followUpStageStyles(
                       fu.stage,
                       fu.status === 'completed'
                     )}`}
@@ -795,6 +940,7 @@ export const CalendarPage: React.FC = () => {
                       </p>
                       <p className="text-xs text-gray-500 dark:text-[#7C8496]">
                         {task.category} · {task.priority} priority
+                        {task.reminderEnabled ? ' · 1-4-7 loop' : ''}
                       </p>
                     </div>
                   </div>
@@ -805,22 +951,24 @@ export const CalendarPage: React.FC = () => {
                 </div>
               ))}
 
-              {selectedDayEvents.gcal.map((ev) => (
+              {selectedDayEvents.localEvents.map((ev) => (
                 <div
                   key={ev.id}
-                  onClick={() => setSelectedEvent({ kind: 'gcal', item: ev })}
-                  className="flex items-center justify-between gap-3 rounded-xl border border-teal-500/25 bg-teal-500/5 dark:bg-teal-500/10 p-3.5 cursor-pointer hover:border-teal-500/50 transition-colors"
+                  onClick={() => setSelectedEvent({ kind: 'localEvent', item: ev })}
+                  className={`flex items-center justify-between gap-3 rounded-xl border p-3.5 cursor-pointer transition-colors ${localEventColorStyles(
+                    ev.color
+                  )}`}
                 >
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                      {ev.summary}
+                      {ev.title}
                     </p>
-                    <p className="text-xs text-teal-700 dark:text-teal-300">
-                      Google Calendar{ev.location ? ` · ${ev.location}` : ''}
+                    <p className="text-xs opacity-85 truncate">
+                      Local Calendar Event{ev.description ? ` · ${ev.description}` : ''}
                     </p>
                   </div>
-                  <span className="text-xs font-mono tabular-nums text-teal-700 dark:text-teal-300 shrink-0">
-                    {ev.startTime ? formatTime12h(ev.startTime) : 'All day'}
+                  <span className="text-xs font-mono tabular-nums shrink-0">
+                    {formatTime12h(ev.time)}
                   </span>
                 </div>
               ))}
@@ -829,8 +977,138 @@ export const CalendarPage: React.FC = () => {
         </section>
       )}
 
+      {/* Add Local Event Modal */}
+      {isEventModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setIsEventModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-gray-200 dark:border-[#242936] bg-white dark:bg-[#13161C] shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 dark:border-[#1E222D] px-6 py-4">
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">
+                Add Local Calendar Event
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsEventModalOpen(false)}
+                aria-label="Close event modal"
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateLocalEvent} className="p-6 space-y-4">
+              {evError && (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-300">
+                  {evError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
+                  Event title
+                </label>
+                <input
+                  type="text"
+                  value={evTitle}
+                  onChange={(e) => setEvTitle(e.target.value)}
+                  placeholder="e.g., Weekly Review Session"
+                  autoFocus
+                  className="w-full rounded-xl border border-gray-200 dark:border-[#252A38] bg-gray-50 dark:bg-[#0D1015] px-3.5 py-2.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
+                  Notes (optional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={evDescription}
+                  onChange={(e) => setEvDescription(e.target.value)}
+                  placeholder="Details or location..."
+                  className="w-full rounded-xl border border-gray-200 dark:border-[#252A38] bg-gray-50 dark:bg-[#0D1015] px-3.5 py-2.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 resize-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
+                    Date
+                  </label>
+                  <input
+                    type="date"
+                    value={evDate}
+                    onChange={(e) => setEvDate(e.target.value)}
+                    className="w-full rounded-xl border border-gray-200 dark:border-[#252A38] bg-gray-50 dark:bg-[#0D1015] px-3 py-2 text-sm font-mono text-gray-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
+                    Time
+                  </label>
+                  <input
+                    type="time"
+                    value={evTime}
+                    onChange={(e) => setEvTime(e.target.value)}
+                    className="w-full rounded-xl border border-gray-200 dark:border-[#252A38] bg-gray-50 dark:bg-[#0D1015] px-3 py-2 text-sm font-mono text-gray-900 dark:text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
+                  Color tag
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['teal', 'violet', 'amber'] as const).map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setEvColor(c)}
+                      className={`rounded-xl border py-1.5 text-xs font-medium capitalize transition-colors ${
+                        evColor === c
+                          ? localEventColorStyles(c)
+                          : 'border-gray-200 dark:border-[#252A38] text-gray-500 dark:text-[#8E96A8]'
+                      }`}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-gray-200 dark:border-[#1E222D]">
+                <button
+                  type="button"
+                  onClick={() => setIsEventModalOpen(false)}
+                  className="rounded-xl border border-gray-200 dark:border-[#262B38] px-4 py-2 text-xs font-medium text-gray-700 dark:text-gray-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-xl bg-gray-900 dark:bg-violet-600 hover:bg-gray-800 dark:hover:bg-violet-500 px-4 py-2 text-xs font-medium text-white"
+                >
+                  Save Event
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Event Detail Modal */}
-      {(activeModalFollowUp || activeModalTask || activeModalGCal) && (
+      {(activeModalTaskReminder ||
+        activeModalFollowUp ||
+        activeModalTask ||
+        activeModalLocalEvent) && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
           role="dialog"
@@ -844,18 +1122,22 @@ export const CalendarPage: React.FC = () => {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-medium text-violet-600 dark:text-violet-400">
-                  {activeModalFollowUp
+                  {activeModalTaskReminder
+                    ? `Day ${activeModalTaskReminder.stage} Task Reminder · Cycle ${activeModalTaskReminder.cycle}`
+                    : activeModalFollowUp
                     ? `Day ${activeModalFollowUp.stage} Learning Follow-up`
                     : activeModalTask
                     ? 'Scheduled Task'
-                    : 'Google Calendar Event'}
+                    : 'Local Calendar Event'}
                 </p>
                 <h3 className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-                  {activeModalFollowUp
+                  {activeModalTaskReminder
+                    ? activeModalTaskReminder.taskTitle
+                    : activeModalFollowUp
                     ? activeModalFollowUp.topicName
                     : activeModalTask
                     ? activeModalTask.title
-                    : activeModalGCal?.summary}
+                    : activeModalLocalEvent?.title}
                 </h3>
               </div>
               <button
@@ -867,6 +1149,40 @@ export const CalendarPage: React.FC = () => {
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {activeModalTaskReminder && (
+              <div className="space-y-3 text-sm text-gray-600 dark:text-[#9CA3AF]">
+                <p>
+                  Category:{' '}
+                  <strong className="text-gray-900 dark:text-white">
+                    {activeModalTaskReminder.category}
+                  </strong>
+                </p>
+                <p className="font-mono text-xs text-gray-500 dark:text-[#8E96A8]">
+                  Scheduled {formatFullDate(activeModalTaskReminder.scheduledDate)} at{' '}
+                  {formatTime12h(activeModalTaskReminder.scheduledTime)}
+                </p>
+                {activeModalTaskReminder.stage === 7 &&
+                  activeModalTaskReminder.status === 'pending' && (
+                    <p className="rounded-xl border border-teal-500/25 bg-teal-500/10 p-3 text-xs text-teal-700 dark:text-teal-300">
+                      Completing this Day 7 reminder will automatically loop into Cycle{' '}
+                      {activeModalTaskReminder.cycle + 1} (Day 1, Day 4, and Day 7).
+                    </p>
+                  )}
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleTaskReminderStatus(activeModalTaskReminder.id)}
+                    className="inline-flex items-center gap-2 rounded-xl bg-violet-600 hover:bg-violet-500 px-4 py-2 text-xs font-medium text-white transition-colors"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    {activeModalTaskReminder.status === 'completed'
+                      ? 'Mark as Pending'
+                      : 'Complete Reminder'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {activeModalFollowUp && (
               <div className="space-y-3 text-sm text-gray-600 dark:text-[#9CA3AF]">
@@ -891,16 +1207,6 @@ export const CalendarPage: React.FC = () => {
                   ) : null;
                 })()}
                 <div className="flex flex-wrap justify-end gap-2 pt-2">
-                  {gcalConnected && (
-                    <button
-                      type="button"
-                      onClick={() => requestSyncFollowUp(activeModalFollowUp)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3.5 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1B1F2A]"
-                    >
-                      <CalendarPlus className="w-3.5 h-3.5" />
-                      Sync to Google Calendar
-                    </button>
-                  )}
                   <button
                     type="button"
                     onClick={() => toggleFollowUpStatus(activeModalFollowUp.id)}
@@ -931,16 +1237,6 @@ export const CalendarPage: React.FC = () => {
                   </div>
                 )}
                 <div className="flex flex-wrap justify-end gap-2 pt-2">
-                  {gcalConnected && (
-                    <button
-                      type="button"
-                      onClick={() => requestSyncTask(activeModalTask)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 dark:border-[#252A38] px-3.5 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-[#1B1F2A]"
-                    >
-                      <CalendarPlus className="w-3.5 h-3.5" />
-                      Sync to Google Calendar
-                    </button>
-                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -964,54 +1260,35 @@ export const CalendarPage: React.FC = () => {
               </div>
             )}
 
-            {activeModalGCal && (
+            {activeModalLocalEvent && (
               <div className="space-y-3 text-sm text-gray-600 dark:text-[#9CA3AF]">
                 <p className="font-mono text-xs text-gray-500 dark:text-[#8E96A8]">
-                  {formatFullDate(activeModalGCal.startDate)} ·{' '}
-                  {activeModalGCal.startTime ? formatTime12h(activeModalGCal.startTime) : 'All day'}
+                  {formatFullDate(activeModalLocalEvent.date)} ·{' '}
+                  {formatTime12h(activeModalLocalEvent.time)}
                 </p>
-                {activeModalGCal.location && (
-                  <p className="text-xs">Location: {activeModalGCal.location}</p>
-                )}
-                {activeModalGCal.description && (
+                {activeModalLocalEvent.description && (
                   <div className="rounded-xl border border-gray-200 dark:border-[#222734] bg-gray-50 dark:bg-[#0D1015] p-3 text-xs leading-relaxed whitespace-pre-wrap">
-                    {activeModalGCal.description}
+                    {activeModalLocalEvent.description}
                   </div>
                 )}
-                <div className="flex flex-wrap justify-end gap-2 pt-2">
+                <div className="flex justify-end gap-2 pt-2">
                   <button
                     type="button"
-                    onClick={() => requestDeleteGCalEvent(activeModalGCal)}
+                    onClick={() => {
+                      deleteLocalEvent(activeModalLocalEvent.id);
+                      setSelectedEvent(null);
+                    }}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-red-500/30 px-3.5 py-2 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-500/10"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     Delete Event
                   </button>
-                  {activeModalGCal.htmlLink && (
-                    <a
-                      href={activeModalGCal.htmlLink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-gray-900 dark:bg-violet-600 hover:bg-gray-800 dark:hover:bg-violet-500 px-4 py-2 text-xs font-medium text-white transition-colors"
-                    >
-                      <span>Open in Google Calendar</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                  )}
                 </div>
               </div>
             )}
           </div>
         </div>
       )}
-
-      <ConfirmGoogleCalendarActionModal
-        action={pendingAction}
-        busy={actionBusy}
-        onCancel={() => {
-          if (!actionBusy) setPendingAction(null);
-        }}
-      />
     </div>
   );
 };

@@ -1,30 +1,24 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { focusFlowRepository } from '../services/dataRepository';
 import {
-  getAccessToken,
-  googleSignIn,
-  initGoogleCalendarAuth,
-  logoutGoogleCalendar,
-} from '../services/googleCalendarAuth';
-import {
-  createGoogleCalendarEvent,
-  deleteGoogleCalendarEvent,
-  fetchGoogleCalendarEvents,
-  GoogleCalendarEvent,
-} from '../services/googleCalendarService';
-import {
   ActivityItem,
   AppSettings,
   FocusFlowState,
-  FollowUpSession,
   LearningTopic,
+  LocalCalendarEvent,
   NavPage,
   PushPermissionState,
   Task,
   UserProfile,
 } from '../types/focusflow';
 import { getTodayISO } from '../utils/dateUtils';
-import { generateFollowUpsForTopic, syncFollowUpsWithTopic } from '../utils/spacedRepetition';
+import {
+  generateFollowUpsForTopic,
+  generateNextTaskReminderLoop,
+  generateTaskReminderCycle,
+  syncFollowUpsWithTopic,
+  syncTaskRemindersWithTask,
+} from '../utils/spacedRepetition';
 
 export interface TaskInput {
   title: string;
@@ -33,6 +27,8 @@ export interface TaskInput {
   priority: Task['priority'];
   dueDate: string;
   dueTime: string;
+  reminderEnabled: boolean;
+  loopReminders: boolean;
 }
 
 export interface TopicInput {
@@ -41,6 +37,14 @@ export interface TopicInput {
   notes: string;
   status: LearningTopic['status'];
   learnedDate: string | null;
+}
+
+export interface LocalEventInput {
+  title: string;
+  description: string;
+  date: string;
+  time: string;
+  color: LocalCalendarEvent['color'];
 }
 
 interface FocusFlowContextValue {
@@ -66,6 +70,9 @@ interface FocusFlowContextValue {
   updateTask: (id: string, input: TaskInput) => void;
   deleteTask: (id: string) => void;
   toggleTaskStatus: (id: string) => void;
+  toggleTaskReminderStatus: (reminderId: string) => void;
+  addLocalEvent: (input: LocalEventInput) => void;
+  deleteLocalEvent: (id: string) => void;
   addTopic: (input: TopicInput) => void;
   updateTopic: (id: string, input: TopicInput) => void;
   deleteTopic: (id: string) => void;
@@ -85,19 +92,7 @@ interface FocusFlowContextValue {
   pauseTimer: () => void;
   resetTimer: () => void;
   completeFocusSession: () => void;
-  // Google Calendar Integration
-  gcalUser: { displayName: string | null; email: string | null } | null;
-  gcalConnected: boolean;
-  gcalEvents: GoogleCalendarEvent[];
-  gcalLoading: boolean;
-  gcalError: string | null;
-  connectGoogleCalendar: () => Promise<void>;
-  disconnectGoogleCalendar: () => Promise<void>;
-  refreshGoogleCalendarEvents: () => Promise<void>;
-  syncTaskToGoogleCalendar: (task: Task) => Promise<void>;
-  syncFollowUpToGoogleCalendar: (followUp: FollowUpSession) => Promise<void>;
-  deleteGoogleCalendarEventById: (eventId: string) => Promise<void>;
-  // Push Notifications
+  // Local Browser Push Notifications
   pushPermission: PushPermissionState;
   requestPushPermission: () => Promise<PushPermissionState>;
 }
@@ -138,56 +133,13 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [timerLabel, setTimerLabel] = useState('Deep Study & Recall');
 
-  // Google Calendar Integration State
-  const [gcalUser, setGcalUser] = useState<{
-    displayName: string | null;
-    email: string | null;
-  } | null>(null);
-  const [gcalConnected, setGcalConnected] = useState(false);
-  const [gcalEvents, setGcalEvents] = useState<GoogleCalendarEvent[]>([]);
-  const [gcalLoading, setGcalLoading] = useState(false);
-  const [gcalError, setGcalError] = useState<string | null>(null);
   const [pushPermission, setPushPermission] = useState<PushPermissionState>(() =>
     typeof Notification === 'undefined'
       ? 'unsupported'
       : (Notification.permission as PushPermissionState)
   );
 
-  const loadCalendarEventsWithToken = async (token: string) => {
-    setGcalLoading(true);
-    setGcalError(null);
-    try {
-      const now = new Date();
-      const timeMin = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
-      const timeMax = new Date(now.getFullYear(), now.getMonth() + 2, 0).toISOString();
-      const events = await fetchGoogleCalendarEvents(token, timeMin, timeMax);
-      setGcalEvents(events);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unable to load Google Calendar events.';
-      setGcalError(message);
-    } finally {
-      setGcalLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    const unsubscribe = initGoogleCalendarAuth(
-      (user, token) => {
-        setGcalUser({ displayName: user.displayName, email: user.email });
-        setGcalConnected(true);
-        void loadCalendarEventsWithToken(token);
-      },
-      () => {
-        setGcalUser(null);
-        setGcalConnected(false);
-        setGcalEvents([]);
-      }
-    );
-    return () => unsubscribe();
-  }, []);
-
-  // Live Push Notification Scheduler for Tasks, 1-4-7 Follow-ups, and Google Calendar Events
+  // Live Local Push Notification Scheduler for Tasks, 1-4-7 Task Reminders, 1-4-7 Follow-ups & Local Calendar Events
   useEffect(() => {
     if (
       typeof Notification === 'undefined' ||
@@ -245,6 +197,23 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             }
           }
         }
+
+        // 1-4-7 Looped Task Reminders
+        for (const rem of state.taskReminders) {
+          if (rem.status !== 'pending' || rem.scheduledDate !== today) continue;
+          const remMins = parseMinutes(rem.scheduledTime) ?? morningMins;
+          if (nowMins >= Math.min(morningMins, remMins - 15)) {
+            const key = `taskrem:${rem.id}:${rem.scheduledDate}`;
+            if (!notified.has(key)) {
+              new Notification(`Day ${rem.stage} Task Reminder: ${rem.taskTitle}`, {
+                body: `Cycle ${rem.cycle} · 1-4-7 reminder loop (${rem.category}).`,
+                icon: '/pwa-192x192.png',
+              });
+              notified.add(key);
+              changed = true;
+            }
+          }
+        }
       }
 
       if (state.settings.remindFollowups && nowMins >= morningMins) {
@@ -262,15 +231,15 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
       }
 
-      for (const ev of gcalEvents) {
-        if (ev.startDate !== today || !ev.startTime) continue;
-        const evMins = parseMinutes(ev.startTime);
+      for (const ev of state.localEvents) {
+        if (ev.date !== today) continue;
+        const evMins = parseMinutes(ev.time);
         if (evMins === null) continue;
-        if (nowMins >= evMins - 15 && nowMins <= evMins + 10) {
-          const key = `gcal:${ev.id}:${ev.startDate}:${ev.startTime}`;
+        if (nowMins >= evMins - 15 && nowMins <= evMins + 15) {
+          const key = `localev:${ev.id}:${ev.date}:${ev.time}`;
           if (!notified.has(key)) {
-            new Notification(`Calendar Event: ${ev.summary}`, {
-              body: `Starts at ${ev.startTime}${ev.location ? ` · ${ev.location}` : ''}`,
+            new Notification(`Local Calendar Event: ${ev.title}`, {
+              body: `Scheduled at ${ev.time}${ev.description ? ` · ${ev.description}` : ''}`,
               icon: '/pwa-192x192.png',
             });
             notified.add(key);
@@ -294,8 +263,9 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     state.settings.remindFollowups,
     state.settings.remindMorningAt,
     state.tasks,
+    state.taskReminders,
     state.followUps,
-    gcalEvents,
+    state.localEvents,
   ]);
 
   // Persist state & sync theme class on <html>
@@ -407,27 +377,51 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
-    setState((prev) => ({
-      ...prev,
-      tasks: [newTask, ...prev.tasks],
-      activities: [
-        makeActivity('task_created', newTask.title, `${newTask.category} · Due ${newTask.dueDate}`),
-        ...prev.activities,
-      ].slice(0, 25),
-    }));
+    setState((prev) => {
+      const createdReminders = generateTaskReminderCycle(
+        newTask,
+        prev.taskReminders,
+        1,
+        newTask.dueDate
+      );
+      const detail = newTask.reminderEnabled
+        ? `${newTask.category} · Due ${newTask.dueDate} · 1-4-7 reminder loop active`
+        : `${newTask.category} · Due ${newTask.dueDate}`;
+      return {
+        ...prev,
+        tasks: [newTask, ...prev.tasks],
+        taskReminders: [...prev.taskReminders, ...createdReminders],
+        activities: [
+          makeActivity('task_created', newTask.title, detail),
+          ...prev.activities,
+        ].slice(0, 25),
+      };
+    });
   };
 
   const updateTask = (id: string, input: TaskInput) => {
-    setState((prev) => ({
-      ...prev,
-      tasks: prev.tasks.map((t) => (t.id === id ? { ...t, ...input } : t)),
-    }));
+    setState((prev) => {
+      let updatedTask: Task | null = null;
+      const nextTasks = prev.tasks.map((t) => {
+        if (t.id !== id) return t;
+        updatedTask = { ...t, ...input };
+        return updatedTask;
+      });
+      if (!updatedTask) return prev;
+      const nextReminders = syncTaskRemindersWithTask(updatedTask, prev.taskReminders);
+      return {
+        ...prev,
+        tasks: nextTasks,
+        taskReminders: nextReminders,
+      };
+    });
   };
 
   const deleteTask = (id: string) => {
     setState((prev) => ({
       ...prev,
       tasks: prev.tasks.filter((t) => t.id !== id),
+      taskReminders: prev.taskReminders.filter((r) => r.taskId !== id),
     }));
   };
 
@@ -458,6 +452,78 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         activities: nextActivities,
       };
     });
+  };
+
+  const toggleTaskReminderStatus = (reminderId: string) => {
+    setState((prev) => {
+      const target = prev.taskReminders.find((r) => r.id === reminderId);
+      if (!target) return prev;
+      const nextStatus: 'pending' | 'completed' =
+        target.status === 'completed' ? 'pending' : 'completed';
+
+      let nextReminders = prev.taskReminders.map((r) =>
+        r.id === reminderId
+          ? {
+              ...r,
+              status: nextStatus,
+              completedAt: nextStatus === 'completed' ? new Date().toISOString() : undefined,
+            }
+          : r
+      );
+
+      let loopedNextCycle = false;
+      if (nextStatus === 'completed' && target.stage === 7) {
+        const parentTask = prev.tasks.find((t) => t.id === target.taskId);
+        if (parentTask) {
+          const nextCycleItems = generateNextTaskReminderLoop(parentTask, target, nextReminders);
+          if (nextCycleItems.length > 0) {
+            nextReminders = [...nextReminders, ...nextCycleItems];
+            loopedNextCycle = true;
+          }
+        }
+      }
+
+      const nextActivities =
+        nextStatus === 'completed'
+          ? [
+              makeActivity(
+                'task_reminder_completed',
+                target.taskTitle,
+                loopedNextCycle
+                  ? `Day ${target.stage} (Cycle ${target.cycle}) completed · Looped Cycle ${
+                      target.cycle + 1
+                    } (Day 1, 4, 7)`
+                  : `Day ${target.stage} task reminder (Cycle ${target.cycle}) completed`
+              ),
+              ...prev.activities,
+            ].slice(0, 25)
+          : prev.activities;
+
+      return {
+        ...prev,
+        taskReminders: nextReminders,
+        activities: nextActivities,
+      };
+    });
+  };
+
+  const addLocalEvent = (input: LocalEventInput) => {
+    const newEvent: LocalCalendarEvent = {
+      id: `loc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      ...input,
+      createdAt: new Date().toISOString(),
+    };
+    setState((prev) => ({
+      ...prev,
+      localEvents: [newEvent, ...prev.localEvents],
+    }));
+  };
+
+  const deleteLocalEvent = (id: string) => {
+    setState((prev) => ({
+      ...prev,
+      localEvents: prev.localEvents.filter((e) => e.id !== id),
+    }));
   };
 
   const addTopic = (input: TopicInput) => {
@@ -571,7 +637,8 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setState((prev) => {
       const target = prev.followUps.find((f) => f.id === followUpId);
       if (!target) return prev;
-      const nextStatus: 'pending' | 'completed' = target.status === 'completed' ? 'pending' : 'completed';
+      const nextStatus: 'pending' | 'completed' =
+        target.status === 'completed' ? 'pending' : 'completed';
       return {
         ...prev,
         followUps: prev.followUps.map((f) =>
@@ -655,92 +722,6 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }));
   };
 
-  const connectGoogleCalendar = async () => {
-    setGcalLoading(true);
-    setGcalError(null);
-    try {
-      const result = await googleSignIn();
-      if (result) {
-        setGcalUser({
-          displayName: result.user.displayName,
-          email: result.user.email,
-        });
-        setGcalConnected(true);
-        await loadCalendarEventsWithToken(result.accessToken);
-      }
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Google Calendar sign-in was cancelled or failed.';
-      setGcalError(message);
-    } finally {
-      setGcalLoading(false);
-    }
-  };
-
-  const disconnectGoogleCalendar = async () => {
-    await logoutGoogleCalendar();
-    setGcalUser(null);
-    setGcalConnected(false);
-    setGcalEvents([]);
-    setGcalError(null);
-  };
-
-  const refreshGoogleCalendarEvents = async () => {
-    const token = await getAccessToken();
-    if (!token) {
-      setGcalConnected(false);
-      setGcalError('Session expired. Please sign in with Google again.');
-      return;
-    }
-    await loadCalendarEventsWithToken(token);
-  };
-
-  const syncTaskToGoogleCalendar = async (task: Task) => {
-    const token = await getAccessToken();
-    if (!token) {
-      setGcalConnected(false);
-      throw new Error('Please sign in with Google first.');
-    }
-    const created = await createGoogleCalendarEvent(token, {
-      summary: `[FocusFlow Task] ${task.title}`,
-      description: `${task.category} · ${task.priority} priority${
-        task.description ? `\n\n${task.description}` : ''
-      }`,
-      dateISO: task.dueDate,
-      timeHHMM: task.dueTime,
-      timeZone: state.settings.timezone,
-    });
-    setGcalEvents((prev) => [...prev, created]);
-  };
-
-  const syncFollowUpToGoogleCalendar = async (followUp: FollowUpSession) => {
-    const token = await getAccessToken();
-    if (!token) {
-      setGcalConnected(false);
-      throw new Error('Please sign in with Google first.');
-    }
-    const topic = state.topics.find((t) => t.id === followUp.topicId);
-    const created = await createGoogleCalendarEvent(token, {
-      summary: `[FocusFlow Day ${followUp.stage} Recall] ${followUp.topicName}`,
-      description: `1-4-7 Spaced Repetition Review · ${followUp.category}${
-        topic?.notes ? `\n\nNotes:\n${topic.notes}` : ''
-      }`,
-      dateISO: followUp.scheduledDate,
-      timeZone: state.settings.timezone,
-    });
-    setGcalEvents((prev) => [...prev, created]);
-  };
-
-  const deleteGoogleCalendarEventById = async (eventId: string) => {
-    const token = await getAccessToken();
-    if (!token) {
-      setGcalConnected(false);
-      throw new Error('Please sign in with Google first.');
-    }
-    await deleteGoogleCalendarEvent(token, eventId);
-    setGcalEvents((prev) => prev.filter((e) => e.id !== eventId));
-  };
-
   const requestPushPermission = async (): Promise<PushPermissionState> => {
     if (typeof Notification === 'undefined') {
       setPushPermission('unsupported');
@@ -750,8 +731,8 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setPushPermission(result);
     if (result === 'granted') {
       updateSettings({ pushEnabled: true });
-      new Notification('FocusFlow Push Notifications Active', {
-        body: 'Alerts enabled for tasks, 1-4-7 follow-ups, and calendar events.',
+      new Notification('FocusFlow Local Notifications Active', {
+        body: 'Alerts enabled for tasks, 1-4-7 task reminder loops, 1-4-7 follow-ups, and local calendar events.',
         icon: '/pwa-192x192.png',
       });
     }
@@ -783,6 +764,9 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         updateTask,
         deleteTask,
         toggleTaskStatus,
+        toggleTaskReminderStatus,
+        addLocalEvent,
+        deleteLocalEvent,
         addTopic,
         updateTopic,
         deleteTopic,
@@ -801,17 +785,6 @@ export const FocusFlowProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         pauseTimer,
         resetTimer,
         completeFocusSession,
-        gcalUser,
-        gcalConnected,
-        gcalEvents,
-        gcalLoading,
-        gcalError,
-        connectGoogleCalendar,
-        disconnectGoogleCalendar,
-        refreshGoogleCalendarEvents,
-        syncTaskToGoogleCalendar,
-        syncFollowUpToGoogleCalendar,
-        deleteGoogleCalendarEventById,
         pushPermission,
         requestPushPermission,
       }}

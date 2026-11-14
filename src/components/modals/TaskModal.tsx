@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { Repeat, X } from 'lucide-react';
 import { useFocusFlow } from '../../context/FocusFlowContext';
 import { TaskPriority } from '../../types/focusflow';
-import { getTodayISO } from '../../utils/dateUtils';
+import { addDaysISO, formatReadableDate, getTodayISO } from '../../utils/dateUtils';
 
 const CATEGORY_SUGGESTIONS = [
   'Study',
@@ -31,6 +31,8 @@ export const TaskModal: React.FC = () => {
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [dueDate, setDueDate] = useState(getTodayISO());
   const [dueTime, setDueTime] = useState('17:00');
+  const [reminderEnabled, setReminderEnabled] = useState(true);
+  const [loopReminders, setLoopReminders] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -43,6 +45,8 @@ export const TaskModal: React.FC = () => {
       setPriority(editingTask.priority);
       setDueDate(editingTask.dueDate);
       setDueTime(editingTask.dueTime);
+      setReminderEnabled(Boolean(editingTask.reminderEnabled));
+      setLoopReminders(editingTask.loopReminders !== false);
     } else {
       setTitle('');
       setDescription('');
@@ -50,10 +54,17 @@ export const TaskModal: React.FC = () => {
       setPriority('medium');
       setDueDate(presetTaskDate || getTodayISO());
       setDueTime('17:00');
+      setReminderEnabled(true);
+      setLoopReminders(true);
     }
   }, [isTaskModalOpen, editingTask, presetTaskDate]);
 
   if (!isTaskModalOpen) return null;
+
+  const anchorDate = dueDate || getTodayISO();
+  const day1Date = addDaysISO(anchorDate, 1);
+  const day4Date = addDaysISO(anchorDate, 4);
+  const day7Date = addDaysISO(anchorDate, 7);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,8 +77,10 @@ export const TaskModal: React.FC = () => {
       description: description.trim(),
       category: category.trim() || 'General',
       priority,
-      dueDate: dueDate || getTodayISO(),
+      dueDate: anchorDate,
       dueTime: dueTime || '17:00',
+      reminderEnabled,
+      loopReminders: reminderEnabled && loopReminders,
     };
     if (editingTask) {
       updateTask(editingTask.id, payload);
@@ -84,8 +97,8 @@ export const TaskModal: React.FC = () => {
       aria-modal="true"
       aria-labelledby="task-modal-title"
     >
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-[#242936] bg-white dark:bg-[#13161C] shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between border-b border-gray-200 dark:border-[#1E222D] px-6 py-4">
+      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-[#242936] bg-white dark:bg-[#13161C] shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
+        <div className="flex items-center justify-between border-b border-gray-200 dark:border-[#1E222D] px-6 py-4 shrink-0">
           <h2 id="task-modal-title" className="text-base font-semibold text-gray-900 dark:text-white">
             {editingTask ? 'Edit Task' : 'Create New Task'}
           </h2>
@@ -99,7 +112,7 @@ export const TaskModal: React.FC = () => {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
           {error && (
             <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-300">
               {error}
@@ -125,7 +138,7 @@ export const TaskModal: React.FC = () => {
               Description
             </label>
             <textarea
-              rows={3}
+              rows={2}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Add notes, links, or checklist details..."
@@ -179,7 +192,7 @@ export const TaskModal: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
-                Due date
+                Start / Due date
               </label>
               <input
                 type="date"
@@ -191,7 +204,7 @@ export const TaskModal: React.FC = () => {
 
             <div>
               <label className="block text-xs font-medium text-gray-600 dark:text-[#9CA3AF] mb-1.5">
-                Due time
+                Reminder time
               </label>
               <input
                 type="time"
@@ -202,9 +215,54 @@ export const TaskModal: React.FC = () => {
             </div>
           </div>
 
-          <p className="text-xs text-gray-500 dark:text-[#737B8C]">
-            Everyday tasks stay in your task schedule and do not generate 1-4-7 spaced-repetition reminders.
-          </p>
+          {/* 1-4-7 Looped Reminder Configuration */}
+          <div className="rounded-xl border border-gray-200 dark:border-[#242936] bg-gray-50/80 dark:bg-[#0D1015] p-3.5 space-y-2.5">
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <div>
+                <p className="text-xs font-semibold text-gray-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Repeat className="w-3.5 h-3.5 text-violet-500" />
+                  1-4-7 Local Calendar Reminders
+                </p>
+                <p className="text-[11px] text-gray-500 dark:text-[#7C8496] mt-0.5">
+                  Automatically remind on Day 1, Day 4, and Day 7 in your local calendar
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                checked={reminderEnabled}
+                onChange={(e) => setReminderEnabled(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-violet-600 rounded"
+              />
+            </label>
+
+            {reminderEnabled && (
+              <>
+                <label className="flex items-center justify-between gap-3 pt-2 border-t border-gray-200/70 dark:border-[#1E232E] cursor-pointer">
+                  <span className="text-[11px] text-gray-600 dark:text-[#9CA3AF]">
+                    Loop into next 1-4-7 cycle after Day 7 is completed
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={loopReminders}
+                    onChange={(e) => setLoopReminders(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-violet-600 rounded"
+                  />
+                </label>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] font-mono text-gray-600 dark:text-[#9CA3AF]">
+                  <span className="rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 px-2 py-0.5">
+                    Day 1: {formatReadableDate(day1Date)}
+                  </span>
+                  <span className="rounded-md bg-rose-500/10 text-rose-700 dark:text-rose-300 border border-rose-500/20 px-2 py-0.5">
+                    Day 4: {formatReadableDate(day4Date)}
+                  </span>
+                  <span className="rounded-md bg-teal-500/10 text-teal-700 dark:text-teal-300 border border-teal-500/20 px-2 py-0.5">
+                    Day 7: {formatReadableDate(day7Date)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
 
           <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-gray-200 dark:border-[#1E222D]">
             <button

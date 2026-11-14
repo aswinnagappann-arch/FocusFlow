@@ -5,10 +5,6 @@ const STORAGE_KEY = 'focusflow_workspace_v2';
 const LEGACY_STORAGE_KEY = 'focusflow_workspace_v1';
 const SETTINGS_KEY = 'focusflow_settings_v1';
 
-/**
- * Backend-ready repository interface designed for future swap-in of
- * Supabase (PostgreSQL + Auth) and Firebase Cloud Messaging (Push).
- */
 export interface FocusFlowRepository {
   loadState(): FocusFlowState;
   saveState(state: FocusFlowState): void;
@@ -28,6 +24,10 @@ class LocalStorageRepository implements FocusFlowRepository {
       const parsed = JSON.parse(raw) as Partial<FocusFlowState>;
       return {
         tasks: Array.isArray(parsed.tasks) ? parsed.tasks : seed.tasks,
+        taskReminders: Array.isArray(parsed.taskReminders)
+          ? parsed.taskReminders
+          : seed.taskReminders,
+        localEvents: Array.isArray(parsed.localEvents) ? parsed.localEvents : seed.localEvents,
         topics: Array.isArray(parsed.topics) ? parsed.topics : seed.topics,
         followUps: Array.isArray(parsed.followUps) ? parsed.followUps : seed.followUps,
         activities: Array.isArray(parsed.activities) ? parsed.activities : seed.activities,

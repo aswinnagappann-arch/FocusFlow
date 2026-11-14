@@ -18,6 +18,8 @@ export function createInitialSeedState(): FocusFlowState {
       remindMorningAt: '08:30',
     },
     tasks: [],
+    taskReminders: [],
+    localEvents: [],
     topics: [],
     followUps: [],
     focusLogs: [],

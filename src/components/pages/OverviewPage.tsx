@@ -33,6 +33,7 @@ export const OverviewPage: React.FC = () => {
     openCreateTopicModal,
     openEditTaskModal,
     toggleTaskStatus,
+    toggleTaskReminderStatus,
     toggleFollowUpStatus,
     timerSecondsLeft,
     isTimerRunning,
@@ -53,7 +54,9 @@ export const OverviewPage: React.FC = () => {
   const totalTasks = state.tasks.length;
   const completedTasks = state.tasks.filter((t) => t.status === 'completed').length;
   const activeTopics = state.topics.filter((t) => t.status === 'learned').length;
-  const pendingFollowUps = state.followUps.filter((f) => f.status === 'pending').length;
+  const pendingFollowUps =
+    state.followUps.filter((f) => f.status === 'pending').length +
+    state.taskReminders.filter((r) => r.status === 'pending').length;
 
   // Today's Tasks
   const todaysTasks = state.tasks
@@ -65,9 +68,29 @@ export const OverviewPage: React.FC = () => {
     })
     .sort((a, b) => a.dueTime.localeCompare(b.dueTime));
 
-  // Upcoming Follow-ups (next 6 pending, sorted by scheduledDate)
-  const upcomingFollowUps = state.followUps
-    .slice()
+  // Upcoming Reminders (1-4-7 task reminders + 1-4-7 topic follow-ups)
+  const upcomingItems = [
+    ...state.taskReminders.map((r) => ({
+      kind: 'taskReminder' as const,
+      id: r.id,
+      title: r.taskTitle,
+      category: r.category,
+      stageLabel: `Day ${r.stage} Task · C${r.cycle}`,
+      stage: r.stage,
+      scheduledDate: r.scheduledDate,
+      status: r.status,
+    })),
+    ...state.followUps.map((f) => ({
+      kind: 'followup' as const,
+      id: f.id,
+      title: f.topicName,
+      category: f.category,
+      stageLabel: `Day ${f.stage} Topic`,
+      stage: f.stage,
+      scheduledDate: f.scheduledDate,
+      status: f.status,
+    })),
+  ]
     .sort((a, b) => {
       if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
       return a.scheduledDate.localeCompare(b.scheduledDate);
@@ -93,8 +116,10 @@ export const OverviewPage: React.FC = () => {
   const totalWeekHours = (totalWeekMinutes / 60).toFixed(1);
 
   // Activity dots matrix for 4th summary card (20 slots representing active vs upcoming)
-  const completedFollowUpsCount = state.followUps.filter((f) => f.status === 'completed').length;
-  const totalFollowUpsCount = Math.max(1, state.followUps.length);
+  const completedFollowUpsCount =
+    state.followUps.filter((f) => f.status === 'completed').length +
+    state.taskReminders.filter((r) => r.status === 'completed').length;
+  const totalFollowUpsCount = Math.max(1, state.followUps.length + state.taskReminders.length);
   const filledDots = Math.round((completedFollowUpsCount / totalFollowUpsCount) * 20);
   const followUpDots = Array.from({ length: 20 }, (_, i) => i < filledDots);
 
@@ -419,15 +444,15 @@ export const OverviewPage: React.FC = () => {
           )}
         </section>
 
-        {/* Right Section: Upcoming Follow-ups */}
+        {/* Right Section: Upcoming Reminders & Follow-ups */}
         <section className="rounded-2xl border border-gray-200 dark:border-[#1E232E] bg-white dark:bg-[#13161C] p-5 sm:p-6">
           <div className="flex items-center justify-between gap-3 mb-4">
             <div>
               <h2 className="text-base font-semibold text-gray-900 dark:text-white">
-                Upcoming Follow-ups
+                Upcoming Reminders
               </h2>
               <p className="text-xs text-gray-500 dark:text-[#7C8496]">
-                Automated 1-4-7 spaced-repetition reminders
+                1-4-7 task loops &amp; learning follow-ups
               </p>
             </div>
             <button
@@ -439,10 +464,10 @@ export const OverviewPage: React.FC = () => {
             </button>
           </div>
 
-          {upcomingFollowUps.length === 0 ? (
+          {upcomingItems.length === 0 ? (
             <div className="py-10 text-center">
               <p className="text-sm text-gray-500 dark:text-[#7C8496]">
-                Mark a learning topic as learned to generate Day 1, Day 4, and Day 7 reminders.
+                Add a task or mark a learning topic as learned to generate your 1-4-7 local reminder schedule.
               </p>
               <button
                 type="button"
@@ -455,19 +480,23 @@ export const OverviewPage: React.FC = () => {
             </div>
           ) : (
             <div className="divide-y divide-gray-100 dark:divide-[#1D212B]">
-              {upcomingFollowUps.map((fu) => {
-                const isDone = fu.status === 'completed';
-                const isDueToday = fu.scheduledDate === today;
-                const isOverdue = fu.scheduledDate < today && !isDone;
+              {upcomingItems.map((item) => {
+                const isDone = item.status === 'completed';
+                const isDueToday = item.scheduledDate === today;
+                const isOverdue = item.scheduledDate < today && !isDone;
                 return (
                   <div
-                    key={fu.id}
+                    key={`${item.kind}-${item.id}`}
                     className="flex items-start gap-3 py-3.5 first:pt-1 last:pb-1"
                   >
                     <button
                       type="button"
-                      onClick={() => toggleFollowUpStatus(fu.id)}
-                      aria-label={`Toggle Day ${fu.stage} follow-up for ${fu.topicName}`}
+                      onClick={() =>
+                        item.kind === 'taskReminder'
+                          ? toggleTaskReminderStatus(item.id)
+                          : toggleFollowUpStatus(item.id)
+                      }
+                      aria-label={`Toggle ${item.stageLabel} for ${item.title}`}
                       className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors ${
                         isDone
                           ? 'bg-emerald-600 border-emerald-600 text-white'
@@ -486,7 +515,7 @@ export const OverviewPage: React.FC = () => {
                               : 'text-gray-900 dark:text-gray-100'
                           }`}
                         >
-                          {fu.topicName}
+                          {item.title}
                         </p>
                         <span
                           className={`text-xs font-medium shrink-0 ${
@@ -499,28 +528,40 @@ export const OverviewPage: React.FC = () => {
                               : 'text-gray-500 dark:text-[#7C8496]'
                           }`}
                         >
-                          {isDone ? 'Completed' : isOverdue ? 'Overdue' : isDueToday ? 'Due today' : 'Scheduled'}
+                          {isDone
+                            ? 'Completed'
+                            : isOverdue
+                            ? 'Overdue'
+                            : isDueToday
+                            ? 'Due today'
+                            : 'Scheduled'}
                         </span>
                       </div>
 
                       <div className="mt-1 flex items-center gap-2 text-xs text-gray-500 dark:text-[#7C8496]">
                         <span
                           className={`font-medium ${
-                            fu.stage === 1
+                            item.kind === 'taskReminder'
+                              ? item.stage === 1
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : item.stage === 4
+                                ? 'text-rose-600 dark:text-rose-400'
+                                : 'text-teal-600 dark:text-teal-400'
+                              : item.stage === 1
                               ? 'text-violet-600 dark:text-violet-400'
-                              : fu.stage === 4
+                              : item.stage === 4
                               ? 'text-sky-600 dark:text-sky-400'
                               : 'text-emerald-600 dark:text-emerald-400'
                           }`}
                         >
-                          Day {fu.stage} Follow-up
+                          {item.stageLabel}
                         </span>
                         <span aria-hidden="true">·</span>
                         <span className="font-mono tabular-nums">
-                          {formatReadableDate(fu.scheduledDate)}
+                          {formatReadableDate(item.scheduledDate)}
                         </span>
                         <span aria-hidden="true">·</span>
-                        <span>{fu.category}</span>
+                        <span>{item.category}</span>
                       </div>
                     </div>
                   </div>
@@ -531,7 +572,7 @@ export const OverviewPage: React.FC = () => {
 
           <div className="mt-4 pt-3 border-t border-gray-100 dark:border-[#1D212B] flex items-center justify-between">
             <span className="text-xs text-gray-500 dark:text-[#7C8496]">
-              1-4-7 recall schedule
+              Local Calendar 1-4-7 schedule
             </span>
             <button
               type="button"

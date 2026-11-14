@@ -18,6 +18,7 @@ export const MyTasksPage: React.FC = () => {
     openEditTaskModal,
     deleteTask,
     toggleTaskStatus,
+    toggleTaskReminderStatus,
   } = useFocusFlow();
 
   const [query, setQuery] = useState('');
@@ -161,11 +162,21 @@ export const MyTasksPage: React.FC = () => {
           <div className="divide-y divide-gray-100 dark:divide-[#1D212B]">
             {filteredTasks.map((task) => {
               const isDone = task.status === 'completed';
+              const taskReminders = state.taskReminders
+                .filter((r) => r.taskId === task.id)
+                .sort((a, b) => (a.cycle !== b.cycle ? b.cycle - a.cycle : a.stage - b.stage));
+              const latestCycle = taskReminders[0]?.cycle;
+              const currentCycleReminders = latestCycle
+                ? taskReminders
+                    .filter((r) => r.cycle === latestCycle)
+                    .sort((a, b) => a.stage - b.stage)
+                : [];
               return (
                 <div
                   key={task.id}
-                  className="flex items-start sm:items-center justify-between gap-4 px-5 py-3.5 hover:bg-gray-50/70 dark:hover:bg-[#171B24] transition-colors group"
+                  className="flex flex-col gap-2 px-5 py-3.5 hover:bg-gray-50/70 dark:hover:bg-[#171B24] transition-colors group"
                 >
+                  <div className="flex items-start sm:items-center justify-between gap-4">
                   <div className="flex items-start gap-3.5 min-w-0 flex-1">
                     <button
                       type="button"
@@ -253,6 +264,33 @@ export const MyTasksPage: React.FC = () => {
                     </div>
                   </div>
                 </div>
+
+                {currentCycleReminders.length > 0 && (
+                  <div className="pl-8.5 flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-medium text-gray-400 dark:text-[#6B7285]">
+                      1-4-7 Loop (Cycle {latestCycle}):
+                    </span>
+                    {currentCycleReminders.map((rem) => {
+                      const remDone = rem.status === 'completed';
+                      return (
+                        <button
+                          key={rem.id}
+                          type="button"
+                          onClick={() => toggleTaskReminderStatus(rem.id)}
+                          className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] font-mono transition-colors ${
+                            remDone
+                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 line-through'
+                              : 'border-gray-200 dark:border-[#262C3B] bg-gray-50 dark:bg-[#0D1015] text-gray-600 dark:text-gray-300 hover:border-violet-500/50'
+                          }`}
+                        >
+                          {remDone && <Check className="w-2.5 h-2.5" />}
+                          Day {rem.stage} · {formatReadableDate(rem.scheduledDate)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               );
             })}
           </div>
